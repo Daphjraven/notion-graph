@@ -4,7 +4,7 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       {
-        source: "/(.*)",
+        source: "/embed/:path*",
         headers: [
           {
             key: "X-Frame-Options",
@@ -12,7 +12,7 @@ const nextConfig: NextConfig = {
           },
           {
             key: "Content-Security-Policy",
-            value: "frame-ancestors *",
+            value: "frame-ancestors 'self' https://www.notion.so https://notion.so;",
           },
         ],
       },
