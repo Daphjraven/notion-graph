@@ -1,113 +1,109 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
-function extractPageId(input: string) {
-  const cleaned = input.trim();
+type SearchResult = {
+  id: string;
+  title: string;
+  url: string;
+  last_edited_time: string;
+};
 
-  // Try dashed UUID first
-  const dashedMatches = cleaned.match(
-    /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi
-  );
-  if (dashedMatches && dashedMatches.length > 0) {
-    return dashedMatches[dashedMatches.length - 1].replace(/-/g, "");
-  }
-
-  // Then look for 32-char hex blocks and take the LAST one
-  const hexMatches = cleaned.match(/[a-f0-9]{32}/gi);
-  if (hexMatches && hexMatches.length > 0) {
-    return hexMatches[hexMatches.length - 1];
-  }
-
-  return null;
-}
-
-export default function Home() {
-  const [url, setUrl] = useState("");
-  const [error, setError] = useState("");
+export default function HomePage() {
   const router = useRouter();
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<SearchResult[]>([]);
+  const [loading, setLoading] = useState(false);
 
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setError("");
+  useEffect(() => {
+    const controller = new AbortController();
 
-    const pageId = extractPageId(url);
+    async function runSearch() {
+      if (!query.trim()) {
+        setResults([]);
+        return;
+      }
 
-    if (!pageId) {
-      setError("Could not find a Notion page ID in that URL.");
-      return;
+      setLoading(true);
+
+      try {
+        const res = await fetch(
+          `/api/search?query=${encodeURIComponent(query)}`,
+          { signal: controller.signal }
+        );
+
+        const data = await res.json();
+        setResults(Array.isArray(data) ? data : []);
+      } catch (error) {
+        if ((error as Error).name !== "AbortError") {
+          console.error(error);
+        }
+      } finally {
+        setLoading(false);
+      }
     }
 
-    router.push(`/graph/${pageId}`);
-  }
+    const timer = setTimeout(runSearch, 250);
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [query]);
 
   return (
-    <main
-      style={{
-        minHeight: "100vh",
-        background: "#0b1020",
-        color: "white",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: "24px",
-      }}
-    >
-      <form
-        onSubmit={handleSubmit}
+    <main style={{ maxWidth: 720, margin: "40px auto", padding: "0 16px" }}>
+      <h1 style={{ fontSize: "2rem", fontWeight: 700, marginBottom: 12 }}>
+        Notion Graph
+      </h1>
+
+      <p style={{ marginBottom: 20, color: "#666" }}>
+        Search for a Notion page, then click it to open its graph.
+      </p>
+
+      <input
+        type="text"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="Search Notion pages..."
         style={{
           width: "100%",
-          maxWidth: "720px",
-          display: "flex",
-          flexDirection: "column",
-          gap: "16px",
+          padding: "12px 14px",
+          fontSize: "1rem",
+          borderRadius: 10,
+          border: "1px solid #ccc",
+          outline: "none",
+          marginBottom: 16,
         }}
-      >
-        <h1 style={{ fontSize: "32px", fontWeight: 700, margin: 0 }}>
-          Notion Graph Viewer
-        </h1>
+      />
 
-        <p style={{ margin: 0, color: "#cbd5e1" }}>
-          Paste any Notion page URL to generate its graph.
-        </p>
+      {loading && <p>Searching...</p>}
 
-        <input
-          type="text"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          placeholder="Paste a Notion page URL here..."
-          style={{
-            padding: "14px 16px",
-            borderRadius: "12px",
-            border: "1px solid #334155",
-            background: "#111827",
-            color: "white",
-            fontSize: "16px",
-            outline: "none",
-          }}
-        />
+      {!loading && query.trim() && results.length === 0 && (
+        <p>No pages found.</p>
+      )}
 
-        <button
-          type="submit"
-          style={{
-            padding: "14px 16px",
-            borderRadius: "12px",
-            border: "none",
-            background: "#38bdf8",
-            color: "#0b1020",
-            fontSize: "16px",
-            fontWeight: 700,
-            cursor: "pointer",
-          }}
-        >
-          Generate Graph
-        </button>
-
-        {error ? (
-          <p style={{ color: "#fda4af", margin: 0 }}>{error}</p>
-        ) : null}
-      </form>
+      <div style={{ display: "grid", gap: 10 }}>
+        {results.map((page) => (
+          <button
+            key={page.id}
+            onClick={() => router.push(`/graph/${page.id}`)}
+            style={{
+              textAlign: "left",
+              padding: "14px 16px",
+              borderRadius: 12,
+              border: "1px solid #e5e5e5",
+              background: "white",
+              cursor: "pointer",
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>{page.title}</div>
+            <div style={{ fontSize: "0.9rem", color: "#666" }}>
+              {page.id}
+            </div>
+          </button>
+        ))}
+      </div>
     </main>
   );
 }
