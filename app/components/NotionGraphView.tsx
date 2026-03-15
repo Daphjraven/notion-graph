@@ -88,7 +88,6 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
         const nodes = Array.isArray(data.nodes) ? data.nodes : [];
         const links = Array.isArray(data.links) ? data.links : [];
 
-        // Fallback: always show at least the root node if API returned one.
         if (nodes.length === 0 && data.root?.id) {
           setGraph({
             nodes: [
@@ -142,15 +141,17 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
 
   useEffect(() => {
     if (!svgRef.current) return;
+
+    const svg = d3.select(svgRef.current);
+    svg.selectAll("*").remove();
+
     if (graph.nodes.length === 0) return;
 
     let simulation: d3.Simulation<GraphNode, GraphLink> | null = null;
 
     const width = window.innerWidth;
     const height = window.innerHeight;
-
-    const svg = d3.select(svgRef.current);
-    svg.selectAll("*").remove();
+    const rootId = graph.root?.id ?? null;
 
     svg
       .attr("viewBox", `0 0 ${width} ${height}`)
@@ -195,12 +196,21 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
         d3
           .forceLink<GraphNode, GraphLink>(links)
           .id((d) => d.id)
-          .distance(85)
+          .distance(120)
           .strength(0.55)
       )
-      .force("charge", d3.forceManyBody<GraphNode>().strength(-180))
+      .force("charge", d3.forceManyBody<GraphNode>().strength(-300))
       .force("center", d3.forceCenter(width / 2, height / 2))
-      .force("collide", d3.forceCollide<GraphNode>(18));
+      .force(
+        "collision",
+        d3.forceCollide<GraphNode>().radius((d) => {
+          const base = d.id === rootId ? 14 : 10;
+          const extra = Math.sqrt(d.backlinkCount ?? 0) * 3;
+          return base + extra;
+        })
+      );
+
+    simulation.alpha(1).restart();
 
     const link = g
       .append("g")
@@ -225,97 +235,113 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
           : 0.9
       );
 
-    const rootId = graph.root?.id ?? null;
-
-const node = g
-  .append("g")
-  .selectAll<SVGCircleElement, GraphNode>("circle")
-  .data(nodes)
-  .join("circle")
-  .attr("r", (d) => {
-    const base = d.id === rootId ? 10 : 6;
-    const extra = Math.sqrt(d.backlinkCount ?? 0) * 2.2;
-    return base + extra;
-  })
-  .attr("fill", (d) => {
-    if (d.id === rootId) return "#4ade80";
-    if (d.id === activeNodeId) return "#ffffff";
-    return "#d9d9d9";
-  })
-  .attr("stroke", (d) => {
-    if (d.id === rootId) return "#86efac";
-    if (d.id === activeNodeId) return "#7dd3fc";
-    return "#f5f5f5";
-  })
-  .attr("stroke-width", (d) => {
-    if (d.id === rootId) return 2.4;
-    if (d.id === activeNodeId) return 2;
-    return 0.8;
-  })
-  .attr("opacity", (d) =>
-    nodeIsRelevant(d, links, activeNodeId) ? 1 : 0.22
-  )
-  .style("cursor", "pointer")
-  .on("mouseenter", (event: MouseEvent, d: GraphNode) => {
-    tooltip
-      .style("opacity", "1")
-      .html(`
-        <div style="font-weight:600; margin-bottom:2px;">
-          ${d.emoji ? `${d.emoji} ` : ""}${d.title}
-        </div>
-        <div style="color:#bdbdbd;">Backlinks: ${d.backlinkCount ?? 0}</div>
-        <div style="color:#94a3b8;">${d.id === rootId ? "Root page" : "Linked page"}</div>
-      `);
-  })
-  .on("mousemove", (event: MouseEvent) => {
-    tooltip
-      .style("left", `${event.clientX + 12}px`)
-      .style("top", `${event.clientY + 12}px`);
-  })
-  .on("mouseleave", () => {
-    tooltip.style("opacity", "0");
-  })
-  .on("click", (_event: MouseEvent, d: GraphNode) => {
-    setSelectedNodeId(d.id);
-    if (d.url) {
-      window.open(d.url, "_blank", "noopener,noreferrer");
-    }
-  })
-  .call(
-    d3
-      .drag<SVGCircleElement, GraphNode>()
-      .on("start", (event, d) => {
-        if (!event.active) simulation?.alphaTarget(0.25).restart();
-        d.fx = d.x;
-        d.fy = d.y;
+    const node = g
+      .append("g")
+      .selectAll<SVGCircleElement, GraphNode>("circle")
+      .data(nodes)
+      .join("circle")
+      .attr("r", (d) => {
+        const base = d.id === rootId ? 10 : 6;
+        const extra = Math.sqrt(d.backlinkCount ?? 0) * 2.2;
+        return base + extra;
       })
-      .on("drag", (event, d) => {
-        d.fx = event.x;
-        d.fy = event.y;
+      .attr("fill", (d) => {
+        if (d.id === rootId) return "#4ade80";
+        if (d.id === activeNodeId) return "#ffffff";
+        return "#d9d9d9";
       })
-      .on("end", (event, d) => {
-        if (!event.active) simulation?.alphaTarget(0);
-        d.fx = null;
-        d.fy = null;
+      .attr("stroke", (d) => {
+        if (d.id === rootId) return "#86efac";
+        if (d.id === activeNodeId) return "#7dd3fc";
+        return "#f5f5f5";
       })
-  );
+      .attr("stroke-width", (d) => {
+        if (d.id === rootId) return 2.4;
+        if (d.id === activeNodeId) return 2;
+        return 0.8;
+      })
+      .attr("opacity", (d) =>
+        nodeIsRelevant(d, links, activeNodeId) ? 1 : 0.22
+      )
+      .style("cursor", "pointer")
+      .on("mouseenter", (_event: MouseEvent, d: GraphNode) => {
+        tooltip
+          .style("opacity", "1")
+          .html(`
+            <div style="font-weight:600; margin-bottom:2px;">
+              ${d.emoji ? `${d.emoji} ` : ""}${d.title}
+            </div>
+            <div style="color:#bdbdbd;">Backlinks: ${d.backlinkCount ?? 0}</div>
+            <div style="color:#94a3b8;">${d.id === rootId ? "Root page" : "Linked page"}</div>
+          `);
+      })
+      .on("mousemove", (event: MouseEvent) => {
+        tooltip
+          .style("left", `${event.clientX + 12}px`)
+          .style("top", `${event.clientY + 12}px`);
+      })
+      .on("mouseleave", () => {
+        tooltip.style("opacity", "0");
+      })
+      .on("click", (_event: MouseEvent, d: GraphNode) => {
+        setSelectedNodeId(d.id);
+      })
+      .on("dblclick", (_event: MouseEvent, d: GraphNode) => {
+        if (d.url) {
+          window.open(d.url, "_blank", "noopener,noreferrer");
+        }
+      })
+      .call(
+        d3
+          .drag<SVGCircleElement, GraphNode>()
+          .on("start", (event, d) => {
+            if (!event.active) simulation?.alphaTarget(0.25).restart();
+            d.fx = d.x;
+            d.fy = d.y;
+          })
+          .on("drag", (event, d) => {
+            d.fx = event.x;
+            d.fy = event.y;
+          })
+          .on("end", (event, d) => {
+            if (!event.active) simulation?.alphaTarget(0);
+            d.fx = null;
+            d.fy = null;
+          })
+      );
 
     const label = g
-  .append("g")
-  .selectAll<SVGTextElement, GraphNode>("text.label")
-  .data(nodes)
-  .join("text")
-  .text((d) =>
-    d.title.length > 30 ? `${d.title.slice(0, 30)}...` : d.title
-  )
-  .attr("fill", (d) => (d.id === rootId ? "#bbf7d0" : "#d6d6d6"))
-  .attr("font-size", (d) => (d.id === rootId ? 11 : 9))
-  .attr("font-weight", (d) => (d.id === rootId ? "600" : "400"))
-  .attr("font-family", "Arial, sans-serif")
-  .attr("pointer-events", "none")
-  .attr("opacity", (d) =>
-    nodeIsRelevant(d, links, activeNodeId) ? 1 : 0.22
-  );
+      .append("g")
+      .selectAll<SVGTextElement, GraphNode>("text.label")
+      .data(nodes)
+      .join("text")
+      .text((d) =>
+        d.title.length > 30 ? `${d.title.slice(0, 30)}...` : d.title
+      )
+      .attr("fill", (d) => (d.id === rootId ? "#bbf7d0" : "#d6d6d6"))
+      .attr("font-size", (d) => (d.id === rootId ? 11 : 9))
+      .attr("font-weight", (d) => (d.id === rootId ? "600" : "400"))
+      .attr("font-family", "Arial, sans-serif")
+      .attr("pointer-events", "none")
+      .attr("opacity", (d) =>
+        nodeIsRelevant(d, links, activeNodeId) ? 1 : 0.22
+      );
+
+    simulation.on("tick", () => {
+      link
+        .attr("x1", (d) => (typeof d.source === "object" ? d.source.x ?? 0 : 0))
+        .attr("y1", (d) => (typeof d.source === "object" ? d.source.y ?? 0 : 0))
+        .attr("x2", (d) => (typeof d.target === "object" ? d.target.x ?? 0 : 0))
+        .attr("y2", (d) => (typeof d.target === "object" ? d.target.y ?? 0 : 0));
+
+      node
+        .attr("cx", (d) => d.x ?? 0)
+        .attr("cy", (d) => d.y ?? 0);
+
+      label
+        .attr("x", (d) => (d.x ?? 0) + 10)
+        .attr("y", (d) => (d.y ?? 0) + 4);
+    });
 
     return () => {
       tooltip.remove();
