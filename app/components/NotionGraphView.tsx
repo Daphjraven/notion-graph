@@ -21,6 +21,10 @@ type GraphLink = d3.SimulationLinkDatum<GraphNode> & {
 type GraphData = {
   nodes: GraphNode[];
   links: GraphLink[];
+  root?: {
+    id: string;
+    title: string;
+  };
 };
 
 function getLinkNodeId(value: string | GraphNode): string {
@@ -60,23 +64,58 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
   const [graph, setGraph] = useState<GraphData>({ nodes: [], links: [] });
   const [search, setSearch] = useState("");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [errorText, setErrorText] = useState("");
 
   useEffect(() => {
     let mounted = true;
 
     async function loadGraph() {
       try {
+        setLoading(true);
+        setErrorText("");
+
         const res = await fetch(`/api/graph/${pageId}`, { cache: "no-store" });
-        const data: GraphData = await res.json();
+        const data = await res.json();
 
         if (!mounted) return;
 
-        setGraph({
-          nodes: Array.isArray(data.nodes) ? data.nodes : [],
-          links: Array.isArray(data.links) ? data.links : [],
-        });
+        if (!res.ok) {
+          setErrorText(JSON.stringify(data, null, 2));
+          setGraph({ nodes: [], links: [] });
+          return;
+        }
+
+        const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+        const links = Array.isArray(data.links) ? data.links : [];
+
+        // Fallback: always show at least the root node if API returned one.
+        if (nodes.length === 0 && data.root?.id) {
+          setGraph({
+            nodes: [
+              {
+                id: data.root.id,
+                title: data.root.title ?? "Untitled",
+                url: "",
+                kind: "page",
+                backlinkCount: 0,
+              },
+            ],
+            links: [],
+            root: data.root,
+          });
+        } else {
+          setGraph({
+            nodes,
+            links,
+            root: data.root,
+          });
+        }
       } catch (err) {
         console.error(err);
+        if (mounted) {
+          setErrorText(String(err));
+          setGraph({ nodes: [], links: [] });
+        }
       } finally {
         if (mounted) setLoading(false);
       }
@@ -103,6 +142,7 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
 
   useEffect(() => {
     if (!svgRef.current) return;
+    if (graph.nodes.length === 0) return;
 
     let simulation: d3.Simulation<GraphNode, GraphLink> | null = null;
 
@@ -185,108 +225,97 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
           : 0.9
       );
 
-    const node = g
-      .append("g")
-      .selectAll<SVGCircleElement, GraphNode>("circle")
-      .data(nodes)
-      .join("circle")
-      .attr("r", (d) => {
-        const base = 5.5;
-        const extra = Math.min(d.backlinkCount ?? 0, 5) * 0.9;
-        return base + extra;
-      })
-      .attr("fill", (d) => (d.id === activeNodeId ? "#ffffff" : "#d9d9d9"))
-      .attr("stroke", (d) => (d.id === activeNodeId ? "#7dd3fc" : "#f5f5f5"))
-      .attr("stroke-width", (d) => (d.id === activeNodeId ? 2 : 0.8))
-      .attr("opacity", (d) => (nodeIsRelevant(d, links, activeNodeId) ? 1 : 0.22))
-      .style("cursor", "pointer")
-      .on("mouseenter", (event: MouseEvent, d: GraphNode) => {
-        tooltip
-          .style("opacity", "1")
-          .html(`
-            <div style="font-weight:600; margin-bottom:2px;">
-              ${d.emoji ? `${d.emoji} ` : ""}${d.title}
-            </div>
-            <div style="color:#bdbdbd;">Backlinks: ${d.backlinkCount ?? 0}</div>
-          `);
-      })
-      .on("mousemove", (event: MouseEvent) => {
-        tooltip
-          .style("left", `${event.clientX + 12}px`)
-          .style("top", `${event.clientY + 12}px`);
-      })
-      .on("mouseleave", () => {
-        tooltip.style("opacity", "0");
-      })
-      .on("click", (_event: MouseEvent, d: GraphNode) => {
-        setSelectedNodeId(d.id);
-      })
-      .on("dblclick", (_event: MouseEvent, d: GraphNode) => {
-        if (d.url) window.open(d.url, "_blank", "noopener,noreferrer");
-      })
-      .call(
-        d3
-          .drag<SVGCircleElement, GraphNode>()
-          .on("start", (event, d) => {
-            if (!event.active) simulation?.alphaTarget(0.25).restart();
-            d.fx = d.x;
-            d.fy = d.y;
-          })
-          .on("drag", (event, d) => {
-            d.fx = event.x;
-            d.fy = event.y;
-          })
-          .on("end", (event, d) => {
-            if (!event.active) simulation?.alphaTarget(0);
-            d.fx = null;
-            d.fy = null;
-          })
-      );
+    const rootId = graph.root?.id ?? null;
 
-    const iconLabel = g
-      .append("g")
-      .selectAll<SVGTextElement, GraphNode>("text.icon")
-      .data(nodes.filter((d) => Boolean(d.emoji)))
-      .join("text")
-      .text((d) => d.emoji ?? "")
-      .attr("font-size", 11)
-      .attr("text-anchor", "middle")
-      .attr("pointer-events", "none")
-      .attr("opacity", (d) => (nodeIsRelevant(d, links, activeNodeId) ? 1 : 0.22));
+const node = g
+  .append("g")
+  .selectAll<SVGCircleElement, GraphNode>("circle")
+  .data(nodes)
+  .join("circle")
+  .attr("r", (d) => {
+    const base = d.id === rootId ? 10 : 6;
+    const extra = Math.sqrt(d.backlinkCount ?? 0) * 2.2;
+    return base + extra;
+  })
+  .attr("fill", (d) => {
+    if (d.id === rootId) return "#4ade80";
+    if (d.id === activeNodeId) return "#ffffff";
+    return "#d9d9d9";
+  })
+  .attr("stroke", (d) => {
+    if (d.id === rootId) return "#86efac";
+    if (d.id === activeNodeId) return "#7dd3fc";
+    return "#f5f5f5";
+  })
+  .attr("stroke-width", (d) => {
+    if (d.id === rootId) return 2.4;
+    if (d.id === activeNodeId) return 2;
+    return 0.8;
+  })
+  .attr("opacity", (d) =>
+    nodeIsRelevant(d, links, activeNodeId) ? 1 : 0.22
+  )
+  .style("cursor", "pointer")
+  .on("mouseenter", (event: MouseEvent, d: GraphNode) => {
+    tooltip
+      .style("opacity", "1")
+      .html(`
+        <div style="font-weight:600; margin-bottom:2px;">
+          ${d.emoji ? `${d.emoji} ` : ""}${d.title}
+        </div>
+        <div style="color:#bdbdbd;">Backlinks: ${d.backlinkCount ?? 0}</div>
+        <div style="color:#94a3b8;">${d.id === rootId ? "Root page" : "Linked page"}</div>
+      `);
+  })
+  .on("mousemove", (event: MouseEvent) => {
+    tooltip
+      .style("left", `${event.clientX + 12}px`)
+      .style("top", `${event.clientY + 12}px`);
+  })
+  .on("mouseleave", () => {
+    tooltip.style("opacity", "0");
+  })
+  .on("click", (_event: MouseEvent, d: GraphNode) => {
+    setSelectedNodeId(d.id);
+    if (d.url) {
+      window.open(d.url, "_blank", "noopener,noreferrer");
+    }
+  })
+  .call(
+    d3
+      .drag<SVGCircleElement, GraphNode>()
+      .on("start", (event, d) => {
+        if (!event.active) simulation?.alphaTarget(0.25).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+      })
+      .on("drag", (event, d) => {
+        d.fx = event.x;
+        d.fy = event.y;
+      })
+      .on("end", (event, d) => {
+        if (!event.active) simulation?.alphaTarget(0);
+        d.fx = null;
+        d.fy = null;
+      })
+  );
 
     const label = g
-      .append("g")
-      .selectAll<SVGTextElement, GraphNode>("text.label")
-      .data(nodes)
-      .join("text")
-      .text((d) =>
-        d.title.length > 28 ? `${d.title.slice(0, 28)}...` : d.title
-      )
-      .attr("fill", "#d6d6d6")
-      .attr("font-size", 8.5)
-      .attr("font-family", "Arial, sans-serif")
-      .attr("pointer-events", "none")
-      .attr("opacity", (d) => (nodeIsRelevant(d, links, activeNodeId) ? 1 : 0.22));
-
-    simulation.on("tick", () => {
-      link
-        .attr("x1", (d) => (typeof d.source === "object" ? d.source.x ?? 0 : 0))
-        .attr("y1", (d) => (typeof d.source === "object" ? d.source.y ?? 0 : 0))
-        .attr("x2", (d) => (typeof d.target === "object" ? d.target.x ?? 0 : 0))
-        .attr("y2", (d) => (typeof d.target === "object" ? d.target.y ?? 0 : 0));
-
-      node
-        .attr("cx", (d) => d.x ?? 0)
-        .attr("cy", (d) => d.y ?? 0);
-
-      iconLabel
-        .attr("x", (d) => d.x ?? 0)
-        .attr("y", (d) => (d.y ?? 0) - 10);
-
-      label
-        .attr("x", (d) => (d.x ?? 0) + 8)
-        .attr("y", (d) => (d.y ?? 0) + 3);
-    });
+  .append("g")
+  .selectAll<SVGTextElement, GraphNode>("text.label")
+  .data(nodes)
+  .join("text")
+  .text((d) =>
+    d.title.length > 30 ? `${d.title.slice(0, 30)}...` : d.title
+  )
+  .attr("fill", (d) => (d.id === rootId ? "#bbf7d0" : "#d6d6d6"))
+  .attr("font-size", (d) => (d.id === rootId ? 11 : 9))
+  .attr("font-weight", (d) => (d.id === rootId ? "600" : "400"))
+  .attr("font-family", "Arial, sans-serif")
+  .attr("pointer-events", "none")
+  .attr("opacity", (d) =>
+    nodeIsRelevant(d, links, activeNodeId) ? 1 : 0.22
+  );
 
     return () => {
       tooltip.remove();
@@ -374,6 +403,45 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
           }}
         >
           Loading graph...
+        </div>
+      )}
+
+      {!loading && errorText && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "#f87171",
+            fontSize: "13px",
+            fontFamily: "Arial, sans-serif",
+            zIndex: 10,
+            padding: 24,
+            textAlign: "center",
+            whiteSpace: "pre-wrap",
+          }}
+        >
+          {errorText}
+        </div>
+      )}
+
+      {!loading && !errorText && graph.nodes.length === 0 && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "#cfcfcf",
+            fontSize: "14px",
+            fontFamily: "Arial, sans-serif",
+            zIndex: 10,
+          }}
+        >
+          No graph nodes found for this page yet.
         </div>
       )}
 
