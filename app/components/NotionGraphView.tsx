@@ -101,7 +101,12 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
   const [loading, setLoading] = useState(true);
   const [graph, setGraph] = useState<GraphData>({ nodes: [], links: [] });
   const [search, setSearch] = useState("");
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(() => {
+  if (typeof window === "undefined") return null;
+
+  const params = new URLSearchParams(window.location.search);
+  return params.get("focus");
+});
   const [errorText, setErrorText] = useState("");
 
   useEffect(() => {
@@ -468,7 +473,11 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
       })
       .on("click", (_event: MouseEvent, d) => {
         setSelectedNodeId(d.id);
-      })
+
+        const url = new URL(window.location.href);
+        url.searchParams.set("focus", d.id);
+        window.history.replaceState({}, "", url.toString());
+    })
       .on("dblclick", (_event: MouseEvent, d) => {
         if (d.url) {
           window.open(d.url, "_blank", "noopener,noreferrer");
