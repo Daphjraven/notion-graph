@@ -16,10 +16,14 @@ type GraphNode = d3.SimulationNodeDatum & {
   group?: GraphGroup;
 };
 
+type IndexedGraphNode = GraphNode & {
+  __index: number;
+};
+
 type GraphLink = {
   source: string | IndexedGraphNode;
   target: string | IndexedGraphNode;
-  type?: "child" | "mention";
+  type?: "child" | "mention" | "link";
 };
 
 type GraphData = {
@@ -29,10 +33,6 @@ type GraphData = {
     id: string;
     title: string;
   };
-};
-
-type IndexedGraphNode = GraphNode & {
-  __index: number;
 };
 
 function getLinkNodeId(value: string | IndexedGraphNode): string {
@@ -80,10 +80,19 @@ function buildNodeMeta(nodes: GraphNode[], links: GraphLink[]) {
     degreeMap.set(targetId, (degreeMap.get(targetId) ?? 0) + 1);
   }
 
-  return nodes.map((node) => ({
-    ...node,
-    degree: degreeMap.get(node.id) ?? 0,
-  }));
+  return nodes.map((node) => {
+    const degree = degreeMap.get(node.id) ?? 0;
+
+    let group: GraphGroup = "core";
+    if (degree === 0) group = "orphan";
+    else if (degree <= 1 && node.id !== nodes[0]?.id) group = "belt";
+
+    return {
+      ...node,
+      degree,
+      group,
+    };
+  });
 }
 
 export default function NotionGraphView({ pageId }: { pageId: string }) {
@@ -114,10 +123,24 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
           return;
         }
 
-        const nodes = Array.isArray(data.nodes) ? data.nodes : [];
-        const links = Array.isArray(data.links) ? data.links : [];
+        const incomingNodes = Array.isArray(data.nodes) ? data.nodes : [];
+        const incomingLinks = Array.isArray(data.links) ? data.links : [];
 
-        if (nodes.length === 0 && data.root?.id) {
+        const MAX_NODES = 80;
+        const MAX_LINKS = 140;
+
+        const trimmedNodes = incomingNodes.slice(0, MAX_NODES);
+        const allowedIds = new Set(trimmedNodes.map((n: GraphNode) => n.id));
+
+        const trimmedLinks = incomingLinks
+          .filter((l: GraphLink) => {
+            const sourceId = getLinkNodeId(l.source);
+            const targetId = getLinkNodeId(l.target);
+            return allowedIds.has(sourceId) && allowedIds.has(targetId);
+          })
+          .slice(0, MAX_LINKS);
+
+        if (trimmedNodes.length === 0 && data.root?.id) {
           setGraph({
             nodes: [
               {
@@ -134,8 +157,8 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
           });
         } else {
           setGraph({
-            nodes,
-            links,
+            nodes: trimmedNodes,
+            links: trimmedLinks,
             root: data.root,
           });
         }
@@ -183,10 +206,10 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
     const height = window.innerHeight;
     const centerX = width / 2;
     const centerY = height / 2;
-    const rootId = graph.root?.id ?? null;
+    const rootId = graph.root?.id ?? graph.nodes[0]?.id ?? null;
 
-    const beltRadius = Math.min(width, height) * 0.38;
-    const orphanRadius = Math.min(width, height) * 0.62;
+    const beltRadius = Math.min(width, height) * 0.35;
+    const orphanRadius = Math.min(width, height) * 0.52;
 
     svg
       .attr("viewBox", `0 0 ${width} ${height}`)
@@ -231,61 +254,63 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
       __index: index,
     }));
 
+    const nodeById = new Map(indexedNodes.map((n) => [n.id, n]));
+
     simulation = d3
       .forceSimulation<IndexedGraphNode>(indexedNodes)
       .force(
         "link",
         d3
-          .forceLink<IndexedGraphNode, GraphLink>(links)
+          .forceLink<IndexedGraphNode, any>(links as any)
           .id((d) => d.id)
-          .distance((link) => {
+          .distance((link: any) => {
             const sourceId = getLinkNodeId(link.source);
             const targetId = getLinkNodeId(link.target);
-            const source = indexedNodes.find((n) => n.id === sourceId);
-            const target = indexedNodes.find((n) => n.id === targetId);
+            const source = nodeById.get(sourceId);
+            const target = nodeById.get(targetId);
 
             if (source?.group === "orphan" || target?.group === "orphan") {
-              return 220;
+              return 180;
             }
 
             if (source?.group === "belt" || target?.group === "belt") {
-              return 170;
+              return 140;
             }
 
-            return 120;
+            return 100;
           })
-          .strength((link) => {
+          .strength((link: any) => {
             const sourceId = getLinkNodeId(link.source);
             const targetId = getLinkNodeId(link.target);
-            const source = indexedNodes.find((n) => n.id === sourceId);
-            const target = indexedNodes.find((n) => n.id === targetId);
+            const source = nodeById.get(sourceId);
+            const target = nodeById.get(targetId);
 
             if (source?.group === "orphan" || target?.group === "orphan") {
-              return 0.04;
+              return 0.03;
             }
 
             if (source?.group === "belt" || target?.group === "belt") {
-              return 0.16;
+              return 0.12;
             }
 
-            return 0.55;
+            return 0.45;
           })
       )
-      .force("charge", d3.forceManyBody<IndexedGraphNode>().strength(-320))
+      .force("charge", d3.forceManyBody<IndexedGraphNode>().strength(-220))
       .force("center", d3.forceCenter(centerX, centerY))
       .force(
         "collision",
         d3.forceCollide<IndexedGraphNode>().radius((d) => {
           const base =
             d.id === rootId
-              ? 16
-              : d.group === "orphan"
               ? 14
+              : d.group === "orphan"
+              ? 9
               : d.group === "belt"
-              ? 10
-              : 9;
+              ? 8
+              : 8;
 
-          const extra = Math.sqrt(d.backlinkCount ?? 0) * 3;
+          const extra = Math.sqrt(d.backlinkCount ?? 0) * 2;
           return base + extra;
         })
       )
@@ -311,10 +336,10 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
             return centerX;
           })
           .strength((d) => {
-            if (d.id === rootId) return 0.26;
-            if (d.group === "orphan") return 0.42;
-            if (d.group === "belt") return 0.2;
-            return 0.08;
+            if (d.id === rootId) return 0.24;
+            if (d.group === "orphan") return 0.34;
+            if (d.group === "belt") return 0.16;
+            return 0.06;
           })
       )
       .force(
@@ -339,14 +364,14 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
             return centerY;
           })
           .strength((d) => {
-            if (d.id === rootId) return 0.26;
-            if (d.group === "orphan") return 0.42;
-            if (d.group === "belt") return 0.2;
-            return 0.08;
+            if (d.id === rootId) return 0.24;
+            if (d.group === "orphan") return 0.34;
+            if (d.group === "belt") return 0.16;
+            return 0.06;
           })
       );
 
-    simulation.alpha(1).restart();
+    simulation.alpha(0.6).restart();
 
     const link = g
       .append("g")
@@ -361,14 +386,14 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
           ? 0.9
           : d.type === "mention"
           ? 0.45
-          : 0.22
+          : 0.18
       )
       .attr("stroke-width", (d) =>
         isConnectedToSelected(d, activeNodeId)
           ? 2
           : d.type === "mention"
-          ? 1.2
-          : 0.9
+          ? 1.1
+          : 0.8
       );
 
     const node = g
@@ -386,7 +411,7 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
             ? 5.5
             : 6;
 
-        const extra = Math.sqrt(d.backlinkCount ?? 0) * 2.2;
+        const extra = Math.sqrt(d.backlinkCount ?? 0) * 1.8;
         return base + extra;
       })
       .attr("fill", (d) => {
@@ -404,9 +429,9 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
         return "#f5f5f5";
       })
       .attr("stroke-width", (d) => {
-        if (d.id === rootId) return 2.4;
+        if (d.id === rootId) return 2.2;
         if (d.id === activeNodeId) return 2;
-        return d.group === "orphan" ? 0.9 : d.group === "belt" ? 0.7 : 0.8;
+        return d.group === "orphan" ? 0.8 : 0.7;
       })
       .attr("opacity", (d) =>
         nodeIsRelevant(d, links, activeNodeId) ? 1 : 0.22
@@ -453,7 +478,7 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
         d3
           .drag<SVGCircleElement, any>()
           .on("start", (event: any, d: any) => {
-            if (!event.active) simulation?.alphaTarget(0.25).restart();
+            if (!event.active) simulation?.alphaTarget(0.2).restart();
             d.fx = d.x;
             d.fy = d.y;
           })
@@ -474,7 +499,7 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
       .data(indexedNodes.filter((d) => Boolean(d.emoji)))
       .join("text")
       .text((d) => d.emoji ?? "")
-      .attr("font-size", (d) => (d.id === rootId ? 16 : 12))
+      .attr("font-size", (d) => (d.id === rootId ? 15 : 11))
       .attr("text-anchor", "middle")
       .attr("pointer-events", "none")
       .attr("opacity", (d) =>
@@ -487,7 +512,7 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
       .data(indexedNodes)
       .join("text")
       .text((d) =>
-        d.title.length > 30 ? `${d.title.slice(0, 30)}...` : d.title
+        d.title.length > 28 ? `${d.title.slice(0, 28)}...` : d.title
       )
       .attr("fill", (d) => {
         if (d.id === rootId) return "#bbf7d0";
@@ -496,10 +521,10 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
         return "#d6d6d6";
       })
       .attr("font-size", (d) => {
-        if (d.id === rootId) return 11;
-        if (d.group === "orphan") return 8;
-        if (d.group === "belt") return 8;
-        return 9;
+        if (d.id === rootId) return 10.5;
+        if (d.group === "orphan") return 7.5;
+        if (d.group === "belt") return 7.5;
+        return 8.5;
       })
       .attr("font-weight", (d) => (d.id === rootId ? "600" : "400"))
       .attr("font-family", "Arial, sans-serif")
@@ -527,10 +552,10 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
 
       emojiLabel
         .attr("x", (d) => d.x ?? 0)
-        .attr("y", (d) => (d.y ?? 0) - 10);
+        .attr("y", (d) => (d.y ?? 0) - 9);
 
       label
-        .attr("x", (d) => (d.x ?? 0) + 10)
+        .attr("x", (d) => (d.x ?? 0) + 9)
         .attr("y", (d) => (d.y ?? 0) + 4);
     });
 
