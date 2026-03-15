@@ -11,6 +11,8 @@ function getNotionClient() {
   return new Client({ auth: token });
 }
 
+type GraphGroup = "core" | "belt" | "orphan";
+
 type GraphNode = {
   id: string;
   title: string;
@@ -18,12 +20,13 @@ type GraphNode = {
   kind: "page";
   backlinkCount: number;
   emoji?: string;
+  group: GraphGroup;
 };
 
 type GraphLink = {
   source: string;
   target: string;
-  type: "child" | "mention";
+  type: "child" | "mention" | "link";
 };
 
 function notionUrlFromId(id: string) {
@@ -104,11 +107,20 @@ export async function GET(
     const nodeMap = new Map<string, GraphNode>();
     const links: GraphLink[] = [];
     const backlinkCounts = new Map<string, number>();
-    const visited = new Set<string>();
+    const visitedPages = new Set<string>();
+    const visitedBlocks = new Set<string>();
 
-    async function addPage(pageId: string) {
+    async function addPage(pageId: string, group: GraphGroup = "core") {
       const normalizedId = normalizePageId(pageId);
-      if (nodeMap.has(normalizedId)) return;
+
+      if (nodeMap.has(normalizedId)) {
+        const existing = nodeMap.get(normalizedId)!;
+        if (existing.group !== "core" && group === "core") {
+          existing.group = "core";
+          nodeMap.set(normalizedId, existing);
+        }
+        return;
+      }
 
       const page = await notion.pages.retrieve({ page_id: normalizedId });
 
@@ -119,97 +131,108 @@ export async function GET(
         kind: "page",
         backlinkCount: backlinkCounts.get(page.id) ?? 0,
         emoji: getPageEmoji(page),
+        group,
       });
     }
 
-    async function walkPage(pageId: string, depth = 0) {
-      const normalizedId = normalizePageId(pageId);
-      if (visited.has(normalizedId)) return;
-      if (depth > 2) return;
+    function bumpBacklink(targetId: string) {
+      backlinkCounts.set(targetId, (backlinkCounts.get(targetId) ?? 0) + 1);
+    }
 
-      visited.add(normalizedId);
+    async function connectPage(
+      sourcePageId: string,
+      targetPageId: string,
+      type: GraphLink["type"],
+      depth: number
+    ) {
+      const normalizedTargetId = normalizePageId(targetPageId);
+
+      try {
+        await addPage(normalizedTargetId, "core");
+
+        links.push({
+          source: sourcePageId,
+          target: normalizedTargetId,
+          type,
+        });
+
+        bumpBacklink(normalizedTargetId);
+
+        await walkPage(normalizedTargetId, depth + 1);
+      } catch {
+        // ignore inaccessible or invalid pages
+      }
+    }
+
+    async function walkBlocks(
+      sourcePageId: string,
+      blockId: string,
+      depth: number
+    ) {
+      const normalizedBlockId = normalizePageId(blockId);
+      const visitKey = `${sourcePageId}:${normalizedBlockId}`;
+
+      if (visitedBlocks.has(visitKey)) return;
+      visitedBlocks.add(visitKey);
 
       let children: any[] = [];
       try {
-        children = await listBlockChildren(notion, normalizedId);
+        children = await listBlockChildren(notion, normalizedBlockId);
       } catch {
         return;
       }
 
       for (const block of children) {
         if (block.type === "child_page") {
-          const childTitle = block.child_page?.title || "Untitled";
-          const childId = block.id;
-
-          if (!nodeMap.has(childId)) {
-            nodeMap.set(childId, {
-              id: childId,
-              title: childTitle,
-              url: notionUrlFromId(childId),
-              kind: "page",
-              backlinkCount: backlinkCounts.get(childId) ?? 0,
-            });
-          }
-
-          links.push({
-            source: normalizedId,
-            target: childId,
-            type: "child",
-          });
-
-          backlinkCounts.set(childId, (backlinkCounts.get(childId) ?? 0) + 1);
-          await walkPage(childId, depth + 1);
+          await connectPage(sourcePageId, block.id, "child", depth);
         }
 
-        const richTextArrays: any[][] = [];
+        if (
+          block.type === "link_to_page" &&
+          block.link_to_page?.type === "page_id"
+        ) {
+          await connectPage(
+            sourcePageId,
+            block.link_to_page.page_id,
+            "link",
+            depth
+          );
+        }
+
         const maybeValue = (block as any)[block.type];
-
         if (maybeValue?.rich_text && Array.isArray(maybeValue.rich_text)) {
-          richTextArrays.push(maybeValue.rich_text);
-        }
-
-        for (const richText of richTextArrays) {
-          for (const item of richText) {
+          for (const item of maybeValue.rich_text) {
             if (item?.type === "mention" && item?.mention?.type === "page") {
-              const mentionedId = normalizePageId(item.mention.page.id);
-
-              if (!nodeMap.has(mentionedId)) {
-                try {
-                  const mentionedPage = await notion.pages.retrieve({
-                    page_id: mentionedId,
-                  });
-
-                  nodeMap.set(mentionedId, {
-                    id: mentionedPage.id,
-                    title: getPageTitle(mentionedPage),
-                    url: getPageUrl(mentionedPage),
-                    kind: "page",
-                    backlinkCount: backlinkCounts.get(mentionedPage.id) ?? 0,
-                    emoji: getPageEmoji(mentionedPage),
-                  });
-                } catch {
-                  continue;
-                }
-              }
-
-              links.push({
-                source: normalizedId,
-                target: mentionedId,
-                type: "mention",
-              });
-
-              backlinkCounts.set(
-                mentionedId,
-                (backlinkCounts.get(mentionedId) ?? 0) + 1
+              await connectPage(
+                sourcePageId,
+                item.mention.page.id,
+                "mention",
+                depth
               );
             }
           }
         }
+
+        // Limited nested recursion for performance
+        if (block.has_children && depth < 2) {
+          await walkBlocks(sourcePageId, block.id, depth + 1);
+        }
       }
     }
 
-    await addPage(rootPage.id);
-    await walkPage(rootPage.id);
+    async function walkPage(pageId: string, depth = 0) {
+      const normalizedId = normalizePageId(pageId);
+
+      if (visitedPages.has(normalizedId)) return;
+      if (depth > 2) return;
+
+      visitedPages.add(normalizedId);
+      await addPage(normalizedId, "core");
+
+      await walkBlocks(normalizedId, normalizedId, depth);
+    }
+
+    await walkPage(rootPage.id, 0);
 
     const nodes = Array.from(nodeMap.values()).map((node) => ({
       ...node,

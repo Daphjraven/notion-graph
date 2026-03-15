@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as d3 from "d3";
 
+type GraphGroup = "core" | "belt" | "orphan";
+
 type GraphNode = d3.SimulationNodeDatum & {
   id: string;
   title: string;
@@ -11,12 +13,12 @@ type GraphNode = d3.SimulationNodeDatum & {
   backlinkCount?: number;
   emoji?: string;
   degree?: number;
-  isBeltNode?: boolean;
+  group?: GraphGroup;
 };
 
-type GraphLink = d3.SimulationLinkDatum<GraphNode> & {
-  source: string | GraphNode;
-  target: string | GraphNode;
+type GraphLink = {
+  source: string | IndexedGraphNode;
+  target: string | IndexedGraphNode;
   type?: "child" | "mention";
 };
 
@@ -29,7 +31,11 @@ type GraphData = {
   };
 };
 
-function getLinkNodeId(value: string | GraphNode): string {
+type IndexedGraphNode = GraphNode & {
+  __index: number;
+};
+
+function getLinkNodeId(value: string | IndexedGraphNode): string {
   return typeof value === "object" ? value.id : value;
 }
 
@@ -59,7 +65,7 @@ function nodeIsRelevant(
   });
 }
 
-function buildNodeMeta(nodes: GraphNode[], links: GraphLink[], rootId: string | null) {
+function buildNodeMeta(nodes: GraphNode[], links: GraphLink[]) {
   const degreeMap = new Map<string, number>();
 
   for (const node of nodes) {
@@ -74,16 +80,10 @@ function buildNodeMeta(nodes: GraphNode[], links: GraphLink[], rootId: string | 
     degreeMap.set(targetId, (degreeMap.get(targetId) ?? 0) + 1);
   }
 
-  return nodes.map((node) => {
-    const degree = degreeMap.get(node.id) ?? 0;
-    const isBeltNode = node.id !== rootId && degree <= 1;
-
-    return {
-      ...node,
-      degree,
-      isBeltNode,
-    };
-  });
+  return nodes.map((node) => ({
+    ...node,
+    degree: degreeMap.get(node.id) ?? 0,
+  }));
 }
 
 export default function NotionGraphView({ pageId }: { pageId: string }) {
@@ -126,6 +126,7 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
                 url: "",
                 kind: "page",
                 backlinkCount: 0,
+                group: "core",
               },
             ],
             links: [],
@@ -176,14 +177,16 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
 
     if (graph.nodes.length === 0) return;
 
-    let simulation: d3.Simulation<GraphNode, GraphLink> | null = null;
+    let simulation: d3.Simulation<IndexedGraphNode, GraphLink> | null = null;
 
     const width = window.innerWidth;
     const height = window.innerHeight;
     const centerX = width / 2;
     const centerY = height / 2;
     const rootId = graph.root?.id ?? null;
-    const beltRadius = Math.min(width, height) * 0.32;
+
+    const beltRadius = Math.min(width, height) * 0.38;
+    const orphanRadius = Math.min(width, height) * 0.62;
 
     svg
       .attr("viewBox", `0 0 ${width} ${height}`)
@@ -221,71 +224,126 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
     let nodes = graph.nodes.map((n) => ({ ...n }));
     const links = graph.links.map((l) => ({ ...l }));
 
-    nodes = buildNodeMeta(nodes, links, rootId);
+    nodes = buildNodeMeta(nodes, links);
+
+    const indexedNodes: IndexedGraphNode[] = nodes.map((node, index) => ({
+      ...node,
+      __index: index,
+    }));
 
     simulation = d3
-      .forceSimulation<GraphNode>(nodes)
+      .forceSimulation<IndexedGraphNode>(indexedNodes)
       .force(
         "link",
         d3
-          .forceLink<GraphNode, GraphLink>(links)
+          .forceLink<IndexedGraphNode, GraphLink>(links)
           .id((d) => d.id)
           .distance((link) => {
             const sourceId = getLinkNodeId(link.source);
             const targetId = getLinkNodeId(link.target);
-            const source = nodes.find((n) => n.id === sourceId);
-            const target = nodes.find((n) => n.id === targetId);
+            const source = indexedNodes.find((n) => n.id === sourceId);
+            const target = indexedNodes.find((n) => n.id === targetId);
 
-            if (source?.isBeltNode || target?.isBeltNode) return 170;
+            if (source?.group === "orphan" || target?.group === "orphan") {
+              return 220;
+            }
+
+            if (source?.group === "belt" || target?.group === "belt") {
+              return 170;
+            }
+
             return 120;
           })
           .strength((link) => {
             const sourceId = getLinkNodeId(link.source);
             const targetId = getLinkNodeId(link.target);
-            const source = nodes.find((n) => n.id === sourceId);
-            const target = nodes.find((n) => n.id === targetId);
+            const source = indexedNodes.find((n) => n.id === sourceId);
+            const target = indexedNodes.find((n) => n.id === targetId);
 
-            if (source?.isBeltNode || target?.isBeltNode) return 0.18;
+            if (source?.group === "orphan" || target?.group === "orphan") {
+              return 0.04;
+            }
+
+            if (source?.group === "belt" || target?.group === "belt") {
+              return 0.16;
+            }
+
             return 0.55;
           })
       )
-      .force("charge", d3.forceManyBody<GraphNode>().strength(-320))
+      .force("charge", d3.forceManyBody<IndexedGraphNode>().strength(-320))
       .force("center", d3.forceCenter(centerX, centerY))
       .force(
         "collision",
-        d3.forceCollide<GraphNode>().radius((d) => {
-          const base = d.id === rootId ? 16 : d.isBeltNode ? 12 : 10;
+        d3.forceCollide<IndexedGraphNode>().radius((d) => {
+          const base =
+            d.id === rootId
+              ? 16
+              : d.group === "orphan"
+              ? 14
+              : d.group === "belt"
+              ? 10
+              : 9;
+
           const extra = Math.sqrt(d.backlinkCount ?? 0) * 3;
           return base + extra;
         })
       )
       .force(
         "x",
-        d3.forceX<GraphNode>((d) => {
-          if (d.id === rootId) return centerX;
-          if (d.isBeltNode) {
+        d3
+          .forceX<IndexedGraphNode>((d) => {
+            if (d.id === rootId) return centerX;
+
             const angle =
-              ((nodes.findIndex((n) => n.id === d.id) + 1) / Math.max(nodes.length, 1)) *
+              ((d.__index + 1) / Math.max(indexedNodes.length, 1)) *
               Math.PI *
               2;
-            return centerX + Math.cos(angle) * beltRadius;
-          }
-          return centerX;
-        }).strength((d) => (d.isBeltNode ? 0.18 : d.id === rootId ? 0.25 : 0.08))
+
+            if (d.group === "orphan") {
+              return centerX + Math.cos(angle) * orphanRadius;
+            }
+
+            if (d.group === "belt") {
+              return centerX + Math.cos(angle) * beltRadius;
+            }
+
+            return centerX;
+          })
+          .strength((d) => {
+            if (d.id === rootId) return 0.26;
+            if (d.group === "orphan") return 0.42;
+            if (d.group === "belt") return 0.2;
+            return 0.08;
+          })
       )
       .force(
         "y",
-        d3.forceY<GraphNode>((d) => {
-          if (d.id === rootId) return centerY;
-          if (d.isBeltNode) {
+        d3
+          .forceY<IndexedGraphNode>((d) => {
+            if (d.id === rootId) return centerY;
+
             const angle =
-              ((nodes.findIndex((n) => n.id === d.id) + 1) / Math.max(nodes.length, 1)) *
+              ((d.__index + 1) / Math.max(indexedNodes.length, 1)) *
               Math.PI *
               2;
-            return centerY + Math.sin(angle) * beltRadius;
-          }
-          return centerY;
-        }).strength((d) => (d.isBeltNode ? 0.18 : d.id === rootId ? 0.25 : 0.08))
+
+            if (d.group === "orphan") {
+              return centerY + Math.sin(angle) * orphanRadius;
+            }
+
+            if (d.group === "belt") {
+              return centerY + Math.sin(angle) * beltRadius;
+            }
+
+            return centerY;
+          })
+          .strength((d) => {
+            if (d.id === rootId) return 0.26;
+            if (d.group === "orphan") return 0.42;
+            if (d.group === "belt") return 0.2;
+            return 0.08;
+          })
       );
 
     simulation.alpha(1).restart();
@@ -303,7 +361,7 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
           ? 0.9
           : d.type === "mention"
           ? 0.45
-          : 0.28
+          : 0.22
       )
       .attr("stroke-width", (d) =>
         isConnectedToSelected(d, activeNodeId)
@@ -315,34 +373,46 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
 
     const node = g
       .append("g")
-      .selectAll<SVGCircleElement, GraphNode>("circle")
-      .data(nodes)
+      .selectAll<SVGCircleElement, IndexedGraphNode>("circle")
+      .data(indexedNodes)
       .join("circle")
       .attr("r", (d) => {
-        const base = d.id === rootId ? 10 : d.isBeltNode ? 5 : 6;
+        const base =
+          d.id === rootId
+            ? 10
+            : d.group === "orphan"
+            ? 7
+            : d.group === "belt"
+            ? 5.5
+            : 6;
+
         const extra = Math.sqrt(d.backlinkCount ?? 0) * 2.2;
         return base + extra;
       })
       .attr("fill", (d) => {
         if (d.id === rootId) return "#4ade80";
         if (d.id === activeNodeId) return "#ffffff";
+        if (d.group === "orphan") return "#c084fc";
+        if (d.group === "belt") return "#93c5fd";
         return "#d9d9d9";
       })
       .attr("stroke", (d) => {
         if (d.id === rootId) return "#86efac";
         if (d.id === activeNodeId) return "#7dd3fc";
+        if (d.group === "orphan") return "#d8b4fe";
+        if (d.group === "belt") return "#bfdbfe";
         return "#f5f5f5";
       })
       .attr("stroke-width", (d) => {
         if (d.id === rootId) return 2.4;
         if (d.id === activeNodeId) return 2;
-        return d.isBeltNode ? 0.6 : 0.8;
+        return d.group === "orphan" ? 0.9 : d.group === "belt" ? 0.7 : 0.8;
       })
       .attr("opacity", (d) =>
         nodeIsRelevant(d, links, activeNodeId) ? 1 : 0.22
       )
       .style("cursor", "pointer")
-      .on("mouseenter", (_event: MouseEvent, d: GraphNode) => {
+      .on("mouseenter", (_event: MouseEvent, d) => {
         tooltip
           .style("opacity", "1")
           .html(`
@@ -354,9 +424,11 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
               ${
                 d.id === rootId
                   ? "Root page"
-                  : d.isBeltNode
-                  ? "Asteroid belt page"
-                  : "Linked page"
+                  : d.group === "orphan"
+                  ? "Orphan ring"
+                  : d.group === "belt"
+                  ? "Asteroid belt"
+                  : "Core cluster"
               }
             </div>
           `);
@@ -369,27 +441,27 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
       .on("mouseleave", () => {
         tooltip.style("opacity", "0");
       })
-      .on("click", (_event: MouseEvent, d: GraphNode) => {
+      .on("click", (_event: MouseEvent, d) => {
         setSelectedNodeId(d.id);
       })
-      .on("dblclick", (_event: MouseEvent, d: GraphNode) => {
+      .on("dblclick", (_event: MouseEvent, d) => {
         if (d.url) {
           window.open(d.url, "_blank", "noopener,noreferrer");
         }
       })
       .call(
         d3
-          .drag<SVGCircleElement, GraphNode>()
-          .on("start", (event, d) => {
+          .drag<SVGCircleElement, any>()
+          .on("start", (event: any, d: any) => {
             if (!event.active) simulation?.alphaTarget(0.25).restart();
             d.fx = d.x;
             d.fy = d.y;
           })
-          .on("drag", (event, d) => {
+          .on("drag", (event: any, d: any) => {
             d.fx = event.x;
             d.fy = event.y;
           })
-          .on("end", (event, d) => {
+          .on("end", (event: any, d: any) => {
             if (!event.active) simulation?.alphaTarget(0);
             d.fx = null;
             d.fy = null;
@@ -398,8 +470,8 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
 
     const emojiLabel = g
       .append("g")
-      .selectAll<SVGTextElement, GraphNode>("text.emoji")
-      .data(nodes.filter((d) => Boolean(d.emoji)))
+      .selectAll<SVGTextElement, IndexedGraphNode>("text.emoji")
+      .data(indexedNodes.filter((d) => Boolean(d.emoji)))
       .join("text")
       .text((d) => d.emoji ?? "")
       .attr("font-size", (d) => (d.id === rootId ? 16 : 12))
@@ -411,16 +483,22 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
 
     const label = g
       .append("g")
-      .selectAll<SVGTextElement, GraphNode>("text.label")
-      .data(nodes)
+      .selectAll<SVGTextElement, IndexedGraphNode>("text.label")
+      .data(indexedNodes)
       .join("text")
       .text((d) =>
         d.title.length > 30 ? `${d.title.slice(0, 30)}...` : d.title
       )
-      .attr("fill", (d) => (d.id === rootId ? "#bbf7d0" : "#d6d6d6"))
+      .attr("fill", (d) => {
+        if (d.id === rootId) return "#bbf7d0";
+        if (d.group === "orphan") return "#e9d5ff";
+        if (d.group === "belt") return "#dbeafe";
+        return "#d6d6d6";
+      })
       .attr("font-size", (d) => {
         if (d.id === rootId) return 11;
-        if (d.isBeltNode) return 8;
+        if (d.group === "orphan") return 8;
+        if (d.group === "belt") return 8;
         return 9;
       })
       .attr("font-weight", (d) => (d.id === rootId ? "600" : "400"))
@@ -432,14 +510,20 @@ export default function NotionGraphView({ pageId }: { pageId: string }) {
 
     simulation.on("tick", () => {
       link
-        .attr("x1", (d) => (typeof d.source === "object" ? d.source.x ?? 0 : 0))
-        .attr("y1", (d) => (typeof d.source === "object" ? d.source.y ?? 0 : 0))
-        .attr("x2", (d) => (typeof d.target === "object" ? d.target.x ?? 0 : 0))
-        .attr("y2", (d) => (typeof d.target === "object" ? d.target.y ?? 0 : 0));
+        .attr("x1", (d) =>
+          typeof d.source === "object" ? d.source.x ?? 0 : 0
+        )
+        .attr("y1", (d) =>
+          typeof d.source === "object" ? d.source.y ?? 0 : 0
+        )
+        .attr("x2", (d) =>
+          typeof d.target === "object" ? d.target.x ?? 0 : 0
+        )
+        .attr("y2", (d) =>
+          typeof d.target === "object" ? d.target.y ?? 0 : 0
+        );
 
-      node
-        .attr("cx", (d) => d.x ?? 0)
-        .attr("cy", (d) => d.y ?? 0);
+      node.attr("cx", (d) => d.x ?? 0).attr("cy", (d) => d.y ?? 0);
 
       emojiLabel
         .attr("x", (d) => d.x ?? 0)
