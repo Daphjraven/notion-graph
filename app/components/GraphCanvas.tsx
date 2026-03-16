@@ -3,19 +3,17 @@
 import { useEffect, useRef, useState } from "react";
 import * as d3 from "d3";
 
-type GraphNode = {
+type GraphNode = d3.SimulationNodeDatum & {
   id: string;
   title: string;
   url: string;
   kind?: "page";
   backlinkCount?: number;
-  x?: number;
-  y?: number;
   fx?: number | null;
   fy?: number | null;
 };
 
-type GraphLink = {
+type GraphLink = d3.SimulationLinkDatum<GraphNode> & {
   source: string | GraphNode;
   target: string | GraphNode;
   type?: "child" | "mention";
@@ -146,23 +144,22 @@ export default function GraphCanvas({ pageId, embedMode = false }: Props) {
         svg.call(zoomBehavior);
 
         const simulation = d3
-          .forceSimulation(nodes as d3.SimulationNodeDatum[])
+          .forceSimulation<GraphNode>(nodes)
           .force(
             "link",
             d3
-              .forceLink(nodes as any)
-              .links(links as any)
-              .id((d: any) => d.id)
+              .forceLink<GraphNode, GraphLink>(links)
+              .id((d) => d.id)
               .distance(embedMode ? 85 : 95)
               .strength(0.55)
           )
-          .force("charge", d3.forceManyBody().strength(embedMode ? -180 : -220))
+          .force("charge", d3.forceManyBody<GraphNode>().strength(embedMode ? -180 : -220))
           .force("center", d3.forceCenter(width / 2, height / 2))
-          .force("collide", d3.forceCollide(embedMode ? 18 : 20));
+          .force("collide", d3.forceCollide<GraphNode>(embedMode ? 18 : 20));
 
         const link = g
           .append("g")
-          .selectAll("line")
+          .selectAll<SVGLineElement, GraphLink>("line")
           .data(links)
           .join("line")
           .attr("stroke", "#777")
@@ -171,7 +168,7 @@ export default function GraphCanvas({ pageId, embedMode = false }: Props) {
 
         const node = g
           .append("g")
-          .selectAll("circle")
+          .selectAll<SVGCircleElement, GraphNode>("circle")
           .data(nodes)
           .join("circle")
           .attr("r", (d) => {
@@ -185,30 +182,31 @@ export default function GraphCanvas({ pageId, embedMode = false }: Props) {
           .style("cursor", "pointer")
           .on("click", (_, d) => {
             if (d.url) window.open(d.url, "_blank");
+          });
+
+        const dragBehavior = d3
+          .drag<SVGCircleElement, GraphNode>()
+          .on("start", (event, d) => {
+            if (!event.active) simulation.alphaTarget(0.25).restart();
+            d.fx = d.x;
+            d.fy = d.y;
           })
-          .call(
-            d3
-              .drag<SVGCircleElement, GraphNode>()
-              .on("start", (event, d) => {
-                if (!event.active) simulation.alphaTarget(0.25).restart();
-                d.fx = d.x;
-                d.fy = d.y;
-              })
-              .on("drag", (event, d) => {
-                d.fx = event.x;
-                d.fy = event.y;
-              })
-              .on("end", (event, d) => {
-                if (!event.active) simulation.alphaTarget(0);
-                d.fx = null;
-                d.fy = null;
-                scheduleSave();
-              })
-          );
+          .on("drag", (event, d) => {
+            d.fx = event.x;
+            d.fy = event.y;
+          })
+          .on("end", (event, d) => {
+            if (!event.active) simulation.alphaTarget(0);
+            d.fx = null;
+            d.fy = null;
+            scheduleSave();
+          });
+
+        node.call(dragBehavior as any);
 
         const label = g
           .append("g")
-          .selectAll("text")
+          .selectAll<SVGTextElement, GraphNode>("text")
           .data(nodes)
           .join("text")
           .text((d) =>
@@ -223,18 +221,18 @@ export default function GraphCanvas({ pageId, embedMode = false }: Props) {
 
         simulation.on("tick", () => {
           link
-            .attr("x1", (d: any) => d.source.x)
-            .attr("y1", (d: any) => d.source.y)
-            .attr("x2", (d: any) => d.target.x)
-            .attr("y2", (d: any) => d.target.y);
+            .attr("x1", (d) => (d.source as GraphNode).x ?? 0)
+            .attr("y1", (d) => (d.source as GraphNode).y ?? 0)
+            .attr("x2", (d) => (d.target as GraphNode).x ?? 0)
+            .attr("y2", (d) => (d.target as GraphNode).y ?? 0);
 
           node
-            .attr("cx", (d: any) => d.x)
-            .attr("cy", (d: any) => d.y);
+            .attr("cx", (d) => d.x ?? 0)
+            .attr("cy", (d) => d.y ?? 0);
 
           label
-            .attr("x", (d: any) => d.x + (embedMode ? 8 : 10))
-            .attr("y", (d: any) => d.y + 3);
+            .attr("x", (d) => (d.x ?? 0) + (embedMode ? 8 : 10))
+            .attr("y", (d) => (d.y ?? 0) + 3);
         });
 
         if (savedState?.zoom) {
