@@ -7,12 +7,9 @@ const nextConfig: NextConfig = {
         source: "/embed/:path*",
         headers: [
           {
-            key: "X-Frame-Options",
-            value: "ALLOWALL",
-          },
-          {
             key: "Content-Security-Policy",
-            value: "frame-ancestors 'self' https://www.notion.so https://notion.so;",
+            value:
+              "frame-ancestors https://www.notion.so https://notion.so https://www.notion.site https://notion.site;",
           },
         ],
       },
