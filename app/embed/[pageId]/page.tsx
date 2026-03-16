@@ -1,11 +1,6 @@
-"use client";
+import GraphCanvas from "@/components/GraphCanvas";
 
-import { useParams } from "next/navigation";
-import NotionGraphView from "@/app/components/NotionGraphView";
-
-export default function EmbedGraphPage() {
-  const params = useParams();
-  const pageId = params.pageId as string;
-
-  return <NotionGraphView pageId={pageId} />;
+export default async function EmbedGraphPage({ params }: any) {
+  const { pageId } = await params;
+  return <GraphCanvas pageId={pageId} embedMode={true} />;
 }
